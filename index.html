@@ -192,11 +192,16 @@ const MAIN = [['Groceries', 'Groceries'], ['Eating out', 'Eating out and takeout
 const MAIN_NAMES = new Set(MAIN.map(m => m[1]));
 const OTHER = 'Other', OTHER_FILTER = '__other';
 const NOT_SPENDING = /^Excluded|^Work: reimbursable/;   // left out of the totals, same rule as the sheet
-const isOther = cat => !MAIN_NAMES.has(cat) && !NOT_SPENDING.test(cat);
+// Recurring bills stay out of Other, so Other only covers everyday extras
+const FIXED = new Set(['Housing', 'Insurance', 'Phone, internet and subscriptions', 'Financing payments',
+  'Family support', 'Parking', 'Bank fees and interest']);
+const FIXED_FILTER = '__fixed';
+const isOther = cat => !MAIN_NAMES.has(cat) && !NOT_SPENDING.test(cat) && !FIXED.has(cat);
 function labelOf(cat) {
   const m = MAIN.find(x => x[1] === cat);
   if (m) return m[0];
   if (cat === 'Needs review') return 'Needs a category';
+  if (FIXED.has(cat)) return 'Fixed bill: ' + cat;
   return cat === OTHER ? OTHER : 'Other: ' + cat;
 }
 
@@ -204,7 +209,7 @@ function labelOf(cat) {
 const CFG_KEY = 'budget.connection', CACHE_KEY = 'budget.cache.';
 function getCfg() { try { return JSON.parse(localStorage.getItem(CFG_KEY)) || null; } catch (e) { return null; } }
 function setCfg(c) { try { c ? localStorage.setItem(CFG_KEY, JSON.stringify(c)) : localStorage.removeItem(CFG_KEY); } catch (e) {} }
-const APP_VERSION = '9';
+const APP_VERSION = '10';
 const VIEW_KEY = 'budget.view';   // the period you were looking at, kept between visits
 function saveView() {
   try { localStorage.setItem(VIEW_KEY, JSON.stringify({ period, start: $('cstart').value, end: $('cend').value, tab, catFilter })); } catch (e) {}
@@ -418,7 +423,10 @@ function displayCategories() {
 
 function budgetView() {
   let h = '<main style="padding-top:4px"><div class="group">' + displayCategories().map(c => c.limit !== null ? limitRow(c) : plainRow(c)).join('') + '</div>';
-  h += '<p class="empty" style="padding-top:4px;font-size:14px">Tap a category to set its monthly limit or see its purchases.' +
+  const fixed = data.categories.filter(c => FIXED.has(c.name)).reduce((a, c) => a + c.spent, 0);
+  h += '<p class="empty" style="padding-top:4px;font-size:14px">' +
+       (fixed ? 'Fixed bills (rent, hydro, insurance, phone, family support…) are not shown: ' + fmt0(fixed) + ' in this period. ' : '') +
+       'Tap a category to set its monthly limit or see its purchases.' +
        (data.factor !== 1 ? ' Limits are set per month; ' + (Number.isInteger(data.factor) ? 'this view adds up ' + data.factor + ' of them.' : 'this view uses the share for ' + data.days + ' days.') : '') + '</p>';
   return h + '</main>';
 }
@@ -443,8 +451,9 @@ function plainRow(c) {
 }
 
 function txView() {
-  const list = data.transactions.filter(t => !catFilter || (catFilter === OTHER_FILTER ? isOther(t.category) : t.category === catFilter));
-  const filters = [['', 'All categories']].concat(MAIN.map(m => [m[1], m[0]]), [[OTHER_FILTER, 'Other'], ['Needs review', 'Needs a category']]);
+  const list = data.transactions.filter(t => !catFilter ||
+    (catFilter === OTHER_FILTER ? isOther(t.category) : catFilter === FIXED_FILTER ? FIXED.has(t.category) : t.category === catFilter));
+  const filters = [['', 'All categories']].concat(MAIN.map(m => [m[1], m[0]]), [[OTHER_FILTER, 'Other'], [FIXED_FILTER, 'Fixed bills'], ['Needs review', 'Needs a category']]);
   let h = '<main><div class="tools"><select id="catfilter" aria-label="Category">' +
           filters.map(f => '<option value="' + esc(f[0]) + '"' + (f[0] === catFilter ? ' selected' : '') + '>' + esc(f[1]) + '</option>').join('') +
           '</select><button data-act="select" class="' + (selecting ? 'on' : '') + '">' + (selecting ? 'Done' : 'Select') + '</button></div>';
@@ -480,7 +489,7 @@ function categorySheet(key) {
         esc(p.name === 'Needs review' ? 'Needs a category' : p.name) + '</span><span>' + fmt0(p.spent) + '</span></div>').join('') + '</div>'
     : '';
   openSheet('<h3>' + esc(c.label) + '</h3><p class="note">' + fmt(c.spent) + ' spent in this period' +
-    (c.limit !== null ? ', limit ' + fmt(c.limit) : '') + (c.parts ? '. Everything outside the seven categories above:' : '') + '</p>' + breakdown +
+    (c.limit !== null ? ', limit ' + fmt(c.limit) : '') + (c.parts ? '. Everything outside the seven categories above, except fixed bills:' : '') + '</p>' + breakdown +
     '<label class="field" for="lim">Monthly limit</label>' +
     '<input class="input" id="lim" type="number" inputmode="decimal" min="0" step="10" placeholder="No limit" value="' + (c.monthlyLimit ?? '') + '">' +
     '<div class="actions"><button class="btn" id="limsave">Save limit</button><button class="btn quiet" id="seetx">See purchases</button></div>' +
@@ -511,8 +520,10 @@ function recategorizeSheet(rows) {
     '<label class="field" for="rc">Category</label><select class="input" id="rc">' +
     (known ? '' : '<option value="" disabled selected>Choose a category</option>') +
     MAIN.map(m => '<option value="' + esc(m[1]) + '"' + (m[1] === current ? ' selected' : '') + '>' + esc(m[0]) + '</option>').join('') +
-    '<optgroup label="Other">' +
-    data.categoryOptions.filter(c => !MAIN_NAMES.has(c)).map(c => '<option value="' + esc(c) + '"' + (c === current ? ' selected' : '') + '>' + esc(c) + '</option>').join('') +
+    '<optgroup label="Fixed bills">' +
+    data.categoryOptions.filter(c => FIXED.has(c)).map(c => '<option value="' + esc(c) + '"' + (c === current ? ' selected' : '') + '>' + esc(c) + '</option>').join('') +
+    '</optgroup><optgroup label="Other">' +
+    data.categoryOptions.filter(c => !MAIN_NAMES.has(c) && !FIXED.has(c)).map(c => '<option value="' + esc(c) + '"' + (c === current ? ' selected' : '') + '>' + esc(c) + '</option>').join('') +
     '<option value="__new">New category…</option></optgroup></select>' +
     '<input class="input" id="rcnew" placeholder="Name of the new category" style="display:none;margin-top:-6px">' +
     (merchants.length ? '<label class="check"><input type="checkbox" id="always"> Use this category for future purchases at ' +
