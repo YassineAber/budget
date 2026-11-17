@@ -191,6 +191,7 @@ const NO_LIMIT = /^Excluded|^Work:|^Needs review$/;
 const CFG_KEY = 'budget.connection', CACHE_KEY = 'budget.cache.';
 function getCfg() { try { return JSON.parse(localStorage.getItem(CFG_KEY)) || null; } catch (e) { return null; } }
 function setCfg(c) { try { c ? localStorage.setItem(CFG_KEY, JSON.stringify(c)) : localStorage.removeItem(CFG_KEY); } catch (e) {} }
+const APP_VERSION = '8';
 const VIEW_KEY = 'budget.view';   // the period you were looking at, kept between visits
 function saveView() {
   try { localStorage.setItem(VIEW_KEY, JSON.stringify({ period, start: $('cstart').value, end: $('cend').value, tab, catFilter })); } catch (e) {}
@@ -625,7 +626,8 @@ function settingsSheet() {
   if (!getCfg()) return;
   openSheet('<h3>Settings</h3><p class="note">To set up Aleksandra\'s phone, send her this link. She adds Budget to her home screen, opens it, and pastes the link in the first box. It contains your key, so only share it with her.</p>' +
     '<div class="actions"><button class="btn" id="copylink">Copy setup link</button><button class="btn quiet" id="refresh">Refresh now</button></div>' +
-    '<button class="textbtn danger" id="disconnect">Disconnect this phone</button>');
+    '<button class="textbtn danger" id="disconnect">Disconnect this phone</button>' +
+    '<p class="note" style="text-align:center;margin:12px 0 0">Version ' + APP_VERSION + '</p>');
   $('copylink').onclick = () => {
     const link = setupLink();
     (navigator.share ? navigator.share({ title: 'Budget', url: link }) : navigator.clipboard.writeText(link).then(() => toast('Link copied')))
@@ -651,8 +653,10 @@ $('logo').onkeydown = e => { if (e.key === 'Enter') settingsSheet(); };
   const v = savedView();
   if (v && (v.tab === 'tx' || v.tab === 'budget')) tab = v.tab;
   if (v && typeof v.catFilter === 'string') catFilter = v.catFilter;
+  // The last custom dates are kept even while another period is shown, so Custom brings them back
+  if (v && v.start && v.end) { $('cstart').value = v.start; $('cend').value = v.end; }
   if (v && v.period === 'custom' && v.start && v.end) {
-    period = 'custom'; $('cstart').value = v.start; $('cend').value = v.end;
+    period = 'custom';
     return load(v.start, v.end);
   }
   if (v && ['week', 'quarter', 'year'].indexOf(v.period) >= 0) {
