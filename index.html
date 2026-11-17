@@ -186,12 +186,25 @@ const esc = s => String(s).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;'
 const $ = id => document.getElementById(id);
 const PERIODS = [['week', 'Week'], ['month', 'Month'], ['quarter', '3 mo'], ['year', 'Year'], ['custom', 'Custom']];
 const NO_LIMIT = /^Excluded|^Work:|^Needs review$/;
+/* The Budget tab always shows these, in this order. [label shown, category name in the sheet] */
+const MAIN = [['Groceries', 'Groceries'], ['Eating out', 'Eating out and takeout'], ['Shopping', 'Shopping'],
+  ['Transportation', 'Transport'], ['Health', 'Health'], ['Travel', 'Travel'], ['Sports', 'Sports and fitness']];
+const MAIN_NAMES = new Set(MAIN.map(m => m[1]));
+const OTHER = 'Other', OTHER_FILTER = '__other';
+const NOT_SPENDING = /^Excluded|^Work: reimbursable/;   // left out of the totals, same rule as the sheet
+const isOther = cat => !MAIN_NAMES.has(cat) && !NOT_SPENDING.test(cat);
+function labelOf(cat) {
+  const m = MAIN.find(x => x[1] === cat);
+  if (m) return m[0];
+  if (cat === 'Needs review') return 'Needs a category';
+  return cat === OTHER ? OTHER : 'Other: ' + cat;
+}
 
 /* ---------- connection to the Google Sheet (Apps Script API) ---------- */
 const CFG_KEY = 'budget.connection', CACHE_KEY = 'budget.cache.';
 function getCfg() { try { return JSON.parse(localStorage.getItem(CFG_KEY)) || null; } catch (e) { return null; } }
 function setCfg(c) { try { c ? localStorage.setItem(CFG_KEY, JSON.stringify(c)) : localStorage.removeItem(CFG_KEY); } catch (e) {} }
-const APP_VERSION = '8';
+const APP_VERSION = '9';
 const VIEW_KEY = 'budget.view';   // the period you were looking at, kept between visits
 function saveView() {
   try { localStorage.setItem(VIEW_KEY, JSON.stringify({ period, start: $('cstart').value, end: $('cend').value, tab, catFilter })); } catch (e) {}
@@ -384,51 +397,56 @@ function updateBulk() {
   $('bulkchange').textContent = selected.size ? 'Change category of ' + selected.size : 'Tick transactions to change';
 }
 
+/* The eight fixed rows: seven named categories, then everything else added up as Other */
+function displayCategories() {
+  const byName = new Map(data.categories.map(c => [c.name, c]));
+  const share = data.isCurrent ? data.elapsed / data.days : (data.today > data.end ? 1 : 0);
+  const round = v => Math.round(v * 100) / 100;
+  const rows = MAIN.map(([label, name]) => {
+    const c = byName.get(name) || { spent: 0, limit: null, monthlyLimit: null, state: 'none', pace: null };
+    return { key: name, label, spent: c.spent, limit: c.limit, monthlyLimit: c.monthlyLimit, state: c.state, pace: c.pace };
+  });
+  const parts = data.categories.filter(c => isOther(c.name) && c.spent);
+  const o = byName.get(OTHER) || { limit: null, monthlyLimit: null };
+  const spent = round(parts.reduce((a, c) => a + c.spent, 0));
+  let state = 'none';
+  if (o.limit !== null) state = spent > o.limit ? 'over' : (data.isCurrent && spent > o.limit * Math.min(1, share + 0.1) ? 'ahead' : 'ok');
+  rows.push({ key: OTHER, label: OTHER, spent, limit: o.limit, monthlyLimit: o.monthlyLimit, state,
+              pace: o.limit !== null ? round(o.limit * share) : null, parts: parts.sort((a, b) => b.spent - a.spent) });
+  return rows;
+}
+
 function budgetView() {
-  const limited = data.categories.filter(c => c.limit !== null);
-  const other = data.categories.filter(c => c.limit === null && c.spent);
-  let h = '<main style="padding-top:4px">';
-  if (limited.length) {
-    h += '<div class="group">' + limited.map(limitRow).join('') +
-         '<button class="addlimit" data-act="newlimit">+ Add a limit</button></div>';
-  } else {
-    h += '<div class="group"><button class="addlimit" style="border:0" data-act="newlimit">+ Add a limit</button></div>';
-  }
-  if (other.length) {
-    h += '<div class="group"><h2>Without a limit</h2>' + other.map(plainRow).join('') + '</div>';
-  }
-  if (!limited.length && !other.length) h += '<p class="empty">No spending in this period.</p>';
-  if (data.factor !== 1) {
-    h += '<p class="empty" style="padding-top:4px;font-size:14px">Limits are set per month. ' +
-         (Number.isInteger(data.factor) ? 'This view adds up ' + data.factor + ' of them.' : 'This view uses the share for ' + data.days + ' days.') + '</p>';
-  }
+  let h = '<main style="padding-top:4px"><div class="group">' + displayCategories().map(c => c.limit !== null ? limitRow(c) : plainRow(c)).join('') + '</div>';
+  h += '<p class="empty" style="padding-top:4px;font-size:14px">Tap a category to set its monthly limit or see its purchases.' +
+       (data.factor !== 1 ? ' Limits are set per month; ' + (Number.isInteger(data.factor) ? 'this view adds up ' + data.factor + ' of them.' : 'this view uses the share for ' + data.days + ' days.') : '') + '</p>';
   return h + '</main>';
 }
 
 function limitRow(c) {
   const left = c.limit - c.spent;
   const pct = c.limit > 0 ? Math.min(100, c.spent / c.limit * 100) : 100;
-  const pace = data.isCurrent && c.limit > 0 ? Math.min(100, c.pace / c.limit * 100) : null;
+  const pace = data.isCurrent && c.limit > 0 && c.pace !== null ? Math.min(100, c.pace / c.limit * 100) : null;
   const num = c.state === 'over' ? fmt0(-left) + ' <small>over</small>' : fmt0(left) + ' <small>left</small>';
   const sub = c.state === 'ahead' ? 'Spending faster than planned'
             : c.state === 'over' ? ''
             : data.isCurrent ? (data.days - data.elapsed) + ' days to go' : '';
-  return '<button class="cat big ' + c.state + '" data-act="cat" data-cat="' + esc(c.name) + '">' +
-         '<div class="top"><span class="name">' + esc(c.name) + '</span><span class="of">' + fmt0(c.spent) + ' of ' + fmt0(c.limit) + '</span></div>' +
+  return '<button class="cat big ' + c.state + '" data-act="cat" data-cat="' + esc(c.key) + '">' +
+         '<div class="top"><span class="name">' + esc(c.label) + '</span><span class="of">' + fmt0(c.spent) + ' of ' + fmt0(c.limit) + '</span></div>' +
          '<div class="num">' + num + '</div>' +
          '<div class="bar"><span style="width:' + pct + '%"></span>' + (pace !== null && pace < 100 ? '<i style="left:' + pace + '%"></i>' : '') + '</div>' +
          (sub ? '<div class="sub">' + sub + '</div>' : '') + '</button>';
 }
 function plainRow(c) {
-  return '<button class="cat plain" data-act="cat" data-cat="' + esc(c.name) + '"><div class="top"><span class="name">' + esc(c.name) +
-         '</span><span class="left">' + fmt0(c.spent) + '</span></div></button>';
+  return '<button class="cat plain" data-act="cat" data-cat="' + esc(c.key) + '"><div class="top"><span class="name">' + esc(c.label) +
+         '</span><span class="left">' + fmt0(c.spent) + '</span></div><div class="sub">No limit</div></button>';
 }
 
 function txView() {
-  const list = data.transactions.filter(t => !catFilter || t.category === catFilter);
-  const cats = Array.from(new Set(data.transactions.map(t => t.category).concat(catFilter ? [catFilter] : []))).sort();
-  let h = '<main><div class="tools"><select id="catfilter" aria-label="Category"><option value="">All categories</option>' +
-          cats.map(c => '<option' + (c === catFilter ? ' selected' : '') + '>' + esc(c) + '</option>').join('') +
+  const list = data.transactions.filter(t => !catFilter || (catFilter === OTHER_FILTER ? isOther(t.category) : t.category === catFilter));
+  const filters = [['', 'All categories']].concat(MAIN.map(m => [m[1], m[0]]), [[OTHER_FILTER, 'Other'], ['Needs review', 'Needs a category']]);
+  let h = '<main><div class="tools"><select id="catfilter" aria-label="Category">' +
+          filters.map(f => '<option value="' + esc(f[0]) + '"' + (f[0] === catFilter ? ' selected' : '') + '>' + esc(f[1]) + '</option>').join('') +
           '</select><button data-act="select" class="' + (selecting ? 'on' : '') + '">' + (selecting ? 'Done' : 'Select') + '</button></div>';
   h += '<div class="count">' + list.length + (list.length === 1 ? ' transaction, ' : ' transactions, ') + fmt(list.reduce((a, t) => a + t.amount, 0)) + '</div>';
   if (!list.length) return h + '<p class="empty">No transactions in this period.</p></main>';
@@ -444,7 +462,7 @@ function txView() {
     h += '<button class="tx" data-act="tx" data-row="' + t.row + '"' + (selecting && selected.has(t.row) ? ' aria-pressed="true"' : '') + '>' +
          (selecting ? '<span class="box' + (selected.has(t.row) ? ' on' : '') + '"></span>' : '') +
          '<span class="body"><div class="m">' + esc(txName(t)) + '</div>' +
-         '<div class="meta' + (review ? ' review' : '') + '">' + (review ? 'Needs a category' : esc(t.category)) + ', ' + esc(t.person) + '</div></span>' +
+         '<div class="meta' + (review ? ' review' : '') + '">' + esc(labelOf(t.category)) + ', ' + esc(t.person) + '</div></span>' +
          '<span class="amt">' + fmt(t.amount) + '</span></button>';
   });
   return h + '</div></main>';
@@ -454,48 +472,37 @@ function txView() {
 function openSheet(html) { $('panel').innerHTML = html; $('sheet').classList.add('open'); }
 function closeSheet() { $('sheet').classList.remove('open'); }
 
-function categorySheet(name) {
-  const c = data.categories.find(x => x.name === name) || { name, spent: 0, limit: null, monthlyLimit: null };
-  const canLimit = !NO_LIMIT.test(name);
-  openSheet('<h3>' + esc(name) + '</h3><p class="note">' + fmt(c.spent) + ' spent in this period' +
-    (c.limit !== null ? ', limit ' + fmt(c.limit) : '') + '</p>' +
-    (canLimit ? '<label class="field" for="lim">Monthly limit</label>' +
-      '<input class="input" id="lim" type="number" inputmode="decimal" min="0" step="10" placeholder="No limit" value="' + (c.monthlyLimit ?? '') + '">' +
-      '<div class="actions"><button class="btn" id="limsave">Save limit</button><button class="btn quiet" id="seetx">See transactions</button></div>' +
-      (c.monthlyLimit !== null ? '<button class="textbtn danger" id="limremove">Remove limit</button>' : '')
-    : '<div class="actions"><button class="btn" id="seetx">See transactions</button></div>'));
-  $('seetx').onclick = () => { closeSheet(); catFilter = name; tab = 'tx'; renderTx(); showTab(); saveView(); window.scrollTo(0, 0); };
-  if (!canLimit) return;
+function categorySheet(key) {
+  const c = displayCategories().find(x => x.key === key);
+  if (!c) return;
+  const breakdown = c.parts && c.parts.length
+    ? '<div style="margin:-6px 0 16px">' + c.parts.map(p => '<div class="top" style="display:flex;justify-content:space-between;font-size:15px;padding:3px 0"><span>' +
+        esc(p.name === 'Needs review' ? 'Needs a category' : p.name) + '</span><span>' + fmt0(p.spent) + '</span></div>').join('') + '</div>'
+    : '';
+  openSheet('<h3>' + esc(c.label) + '</h3><p class="note">' + fmt(c.spent) + ' spent in this period' +
+    (c.limit !== null ? ', limit ' + fmt(c.limit) : '') + (c.parts ? '. Everything outside the seven categories above:' : '') + '</p>' + breakdown +
+    '<label class="field" for="lim">Monthly limit</label>' +
+    '<input class="input" id="lim" type="number" inputmode="decimal" min="0" step="10" placeholder="No limit" value="' + (c.monthlyLimit ?? '') + '">' +
+    '<div class="actions"><button class="btn" id="limsave">Save limit</button><button class="btn quiet" id="seetx">See purchases</button></div>' +
+    (c.monthlyLimit !== null ? '<button class="textbtn danger" id="limremove">Remove limit</button>' : ''));
+  $('seetx').onclick = () => {
+    closeSheet(); catFilter = key === OTHER ? OTHER_FILTER : key; tab = 'tx';
+    renderTx(); showTab(); saveView(); window.scrollTo(0, 0);
+  };
   const save = (value, btn, done) => {
     btn.disabled = true;
     server().withSuccessHandler(() => { closeSheet(); toast(done); reload(); })
-      .withFailureHandler(err => { btn.disabled = false; toast(err.message); }).setLimit(name, value);
+      .withFailureHandler(err => { btn.disabled = false; toast(err.message); }).setLimit(key, value);
   };
   $('limsave').onclick = e => { const v = $('lim').value.trim(); if (v === '') return toast('Enter an amount, or remove the limit'); save(v, e.currentTarget, 'Limit saved'); };
   if ($('limremove')) $('limremove').onclick = e => save('', e.currentTarget, 'Limit removed');
-}
-
-function newLimitSheet() {
-  const taken = new Set(data.categories.filter(c => c.limit !== null).map(c => c.name));
-  const opts = data.categoryOptions.filter(c => !taken.has(c) && !NO_LIMIT.test(c));
-  openSheet('<h3>Add a limit</h3><p class="note">Set a monthly amount for another category.</p>' +
-    '<label class="field" for="nlcat">Category</label><select class="input" id="nlcat">' + opts.map(c => '<option>' + esc(c) + '</option>').join('') + '</select>' +
-    '<label class="field" for="nlval">Monthly limit</label><input class="input" id="nlval" type="number" inputmode="decimal" min="0" step="10">' +
-    '<div class="actions"><button class="btn" id="nlsave">Add limit</button><button class="btn quiet" id="nlcancel">Cancel</button></div>');
-  $('nlcancel').onclick = closeSheet;
-  $('nlsave').onclick = e => {
-    const v = $('nlval').value.trim(); if (v === '') return toast('Enter an amount');
-    e.currentTarget.disabled = true;
-    server().withSuccessHandler(() => { closeSheet(); toast('Limit added'); reload(); })
-      .withFailureHandler(err => { e.currentTarget.disabled = false; toast(err.message); }).setLimit($('nlcat').value, v);
-  };
 }
 
 function recategorizeSheet(rows) {
   const items = rows.map(r => data.transactions.find(x => x.row === r));
   const single = items.length === 1, first = items[0];
   const current = single ? first.category : '';
-  const known = data.categoryOptions.indexOf(current) >= 0;
+  const known = MAIN_NAMES.has(current) || data.categoryOptions.indexOf(current) >= 0;
   const merchants = Array.from(new Set(items.map(t => t.merchant).filter(Boolean)));
   const when = single ? F_MD.format(parse(first.date.slice(0, 10))) : '';
   openSheet('<h3>' + (single ? esc(txName(first)) : items.length + ' transactions') + '</h3>' +
@@ -503,8 +510,10 @@ function recategorizeSheet(rows) {
     (single && first.merchant ? '<br>' + esc(first.merchant) : '') + '</p>' +
     '<label class="field" for="rc">Category</label><select class="input" id="rc">' +
     (known ? '' : '<option value="" disabled selected>Choose a category</option>') +
-    data.categoryOptions.map(c => '<option' + (c === current ? ' selected' : '') + '>' + esc(c) + '</option>').join('') +
-    '<option value="__new">New category…</option></select>' +
+    MAIN.map(m => '<option value="' + esc(m[1]) + '"' + (m[1] === current ? ' selected' : '') + '>' + esc(m[0]) + '</option>').join('') +
+    '<optgroup label="Other">' +
+    data.categoryOptions.filter(c => !MAIN_NAMES.has(c)).map(c => '<option value="' + esc(c) + '"' + (c === current ? ' selected' : '') + '>' + esc(c) + '</option>').join('') +
+    '<option value="__new">New category…</option></optgroup></select>' +
     '<input class="input" id="rcnew" placeholder="Name of the new category" style="display:none;margin-top:-6px">' +
     (merchants.length ? '<label class="check"><input type="checkbox" id="always"> Use this category for future purchases at ' +
       (merchants.length === 1 ? esc(tidy(merchants[0])) : 'these ' + merchants.length + ' places') + '</label>' : '') +
@@ -540,7 +549,6 @@ $('view').addEventListener('click', e => {
   if (!el || !data) return;
   const a = el.dataset.act;
   if (a === 'cat') categorySheet(el.dataset.cat);
-  if (a === 'newlimit') newLimitSheet();
   if (a === 'select') { selecting = !selecting; selected.clear(); renderTx(); }
   if (a === 'tx') {
     const row = Number(el.dataset.row);
