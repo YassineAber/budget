@@ -42,6 +42,73 @@ function readLimits_(ss) {
   return out;
 }
 
+/* ---------- The categories shown on the Budget tab, in order ---------- */
+const CATEGORIES_HEADERS = ['Category (as in Transactions)', 'Name shown in the app'];
+const DEFAULT_LAYOUT = [['Groceries', 'Groceries'], ['Eating out and takeout', 'Eating out'], ['Shopping', 'Shopping'],
+  ['Transport', 'Transportation'], ['Health', 'Health'], ['Travel', 'Travel'], ['Sports and fitness', 'Sports']];
+const RESERVED = /^(Other|Needs review)$|^Excluded|^Work:/i;
+
+function categoriesTab_(ss) {
+  let sh = ss.getSheetByName('Categories');
+  if (!sh) {
+    sh = ss.insertSheet('Categories');
+    sh.getRange(1, 1, 1, 2).setValues([CATEGORIES_HEADERS]).setFontWeight('bold');
+    sh.setFrozenRows(1);
+    sh.getRange(2, 1, DEFAULT_LAYOUT.length, 2).setValues(DEFAULT_LAYOUT);
+  }
+  return sh;
+}
+
+/** [{name, label}] in the order the rows appear in the Categories tab. */
+function readLayout_(ss) {
+  const sh = categoriesTab_(ss);
+  const n = sh.getLastRow() - 1;
+  if (n < 1) return [];
+  return sh.getRange(2, 1, n, 2).getValues()
+    .map(r => ({ name: String(r[0]).trim(), label: String(r[1]).trim() || String(r[0]).trim() }))
+    .filter(c => c.name);
+}
+
+/** Adds a category to the Budget tab (just before Other). */
+function addCategory(name, label) {
+  name = String(name || '').trim();
+  label = String(label || '').trim() || name;
+  if (!name) throw new Error('Enter a name');
+  if (name.length > 40) throw new Error('Keep the name under 40 characters');
+  if (RESERVED.test(name)) throw new Error('That name is already used by the app');
+  const lock = LockService.getDocumentLock();
+  lock.waitLock(10000);
+  try {
+    const ss = sheet_();
+    const layout = readLayout_(ss);
+    const lower = s => s.toLowerCase();
+    if (layout.some(c => lower(c.name) === lower(name) || lower(c.label) === lower(label))) {
+      throw new Error(label + ' is already on the list');
+    }
+    categoriesTab_(ss).appendRow([name, label]);
+  } finally {
+    lock.releaseLock();
+  }
+  return true;
+}
+
+/** Takes a category off the Budget tab. Its purchases stay as they are and count in Other. */
+function removeCategory(name) {
+  const lock = LockService.getDocumentLock();
+  lock.waitLock(10000);
+  try {
+    const sh = categoriesTab_(sheet_());
+    const n = sh.getLastRow() - 1;
+    const names = n > 0 ? sh.getRange(2, 1, n, 1).getValues().map(r => String(r[0]).trim()) : [];
+    const i = names.indexOf(String(name).trim());
+    if (i < 0) throw new Error('Not on the list');
+    sh.deleteRow(i + 2);
+  } finally {
+    lock.releaseLock();
+  }
+  return true;
+}
+
 function readTransactions_(ss) {
   const sh = ss.getSheetByName('Transactions');
   const n = sh.getLastRow() - 1;
@@ -62,6 +129,7 @@ function readTransactions_(ss) {
 
 function knownCategories_(ss, limits) {
   const set = new Set(Object.keys(limits));
+  readLayout_(ss).forEach(c => set.add(c.name));
   const rules = ss.getSheetByName('Rules');
   if (rules && rules.getLastRow() > 1) {
     rules.getRange(2, 2, rules.getLastRow() - 1, 1).getValues().forEach(r => r[0] && set.add(String(r[0]).trim()));
@@ -146,6 +214,7 @@ function getDashboard(startIso, endIso) {
   const summary = summarize_(readTransactions_(ss), limits, startIso, endIso, today);
   summary.transactions.sort((a, b) => (a.date < b.date ? 1 : -1));
   summary.categoryOptions = knownCategories_(ss, limits);
+  summary.layout = readLayout_(ss);
   summary.today = today;
   return summary;
 }
@@ -262,6 +331,8 @@ function doPost(e) {
     checkKey_(body.key);
     if (body.action === 'setLimit') setLimit(body.category, body.value);
     else if (body.action === 'setCategories') setCategories(body.items, body.category, body.always);
+    else if (body.action === 'addCategory') addCategory(body.name, body.label);
+    else if (body.action === 'removeCategory') removeCategory(body.name);
     else throw new Error('Unknown action');
     return json_({ ok: true });
   } catch (err) {

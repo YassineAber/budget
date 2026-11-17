@@ -187,9 +187,14 @@ const $ = id => document.getElementById(id);
 const PERIODS = [['week', 'Week'], ['month', 'Month'], ['quarter', '3 mo'], ['year', 'Year'], ['custom', 'Custom']];
 const NO_LIMIT = /^Excluded|^Work:|^Needs review$/;
 /* The Budget tab always shows these, in this order. [label shown, category name in the sheet] */
-const MAIN = [['Groceries', 'Groceries'], ['Eating out', 'Eating out and takeout'], ['Shopping', 'Shopping'],
+/* Default list; the sheet's Categories tab replaces it (and holds categories you add) */
+const DEFAULT_MAIN = [['Groceries', 'Groceries'], ['Eating out', 'Eating out and takeout'], ['Shopping', 'Shopping'],
   ['Transportation', 'Transport'], ['Health', 'Health'], ['Travel', 'Travel'], ['Sports', 'Sports and fitness']];
-const MAIN_NAMES = new Set(MAIN.map(m => m[1]));
+let MAIN = DEFAULT_MAIN, MAIN_NAMES = new Set(MAIN.map(m => m[1]));
+function useLayout(layout) {
+  MAIN = layout && layout.length ? layout.map(c => [c.label || c.name, c.name]) : DEFAULT_MAIN;
+  MAIN_NAMES = new Set(MAIN.map(m => m[1]));
+}
 const OTHER = 'Other', OTHER_FILTER = '__other';
 const NOT_SPENDING = /^Excluded|^Work: reimbursable/;   // left out of the totals, same rule as the sheet
 // Recurring bills stay out of Other, so Other only covers everyday extras
@@ -197,11 +202,12 @@ const FIXED = new Set(['Housing', 'Insurance', 'Phone, internet and subscription
   'Family support', 'Parking', 'Bank fees and interest']);
 const FIXED_FILTER = '__fixed';
 const isOther = cat => !MAIN_NAMES.has(cat) && !NOT_SPENDING.test(cat) && !FIXED.has(cat);
+const isFixed = cat => FIXED.has(cat) && !MAIN_NAMES.has(cat);
 function labelOf(cat) {
   const m = MAIN.find(x => x[1] === cat);
   if (m) return m[0];
   if (cat === 'Needs review') return 'Needs a category';
-  if (FIXED.has(cat)) return 'Fixed bill: ' + cat;
+  if (isFixed(cat)) return 'Fixed bill: ' + cat;
   return cat === OTHER ? OTHER : 'Other: ' + cat;
 }
 
@@ -209,7 +215,7 @@ function labelOf(cat) {
 const CFG_KEY = 'budget.connection', CACHE_KEY = 'budget.cache.';
 function getCfg() { try { return JSON.parse(localStorage.getItem(CFG_KEY)) || null; } catch (e) { return null; } }
 function setCfg(c) { try { c ? localStorage.setItem(CFG_KEY, JSON.stringify(c)) : localStorage.removeItem(CFG_KEY); } catch (e) {} }
-const APP_VERSION = '10';
+const APP_VERSION = '11';
 const VIEW_KEY = 'budget.view';   // the period you were looking at, kept between visits
 function saveView() {
   try { localStorage.setItem(VIEW_KEY, JSON.stringify({ period, start: $('cstart').value, end: $('cend').value, tab, catFilter })); } catch (e) {}
@@ -259,6 +265,8 @@ function server() {
     getDashboard(start, end) { call('GET', { action: 'dashboard', start, end }).then(ok, fail); },
     setLimit(category, value) { call('POST', { action: 'setLimit', category, value }).then(ok, fail); },
     setCategories(items, category, always) { call('POST', { action: 'setCategories', items, category, always }).then(ok, fail); },
+    addCategory(name, label) { call('POST', { action: 'addCategory', name, label }).then(ok, fail); },
+    removeCategory(name) { call('POST', { action: 'removeCategory', name }).then(ok, fail); },
   };
   return api;
 }
@@ -350,6 +358,7 @@ function load(start, end) {
 }
 function setData(d, json, stale) {
   data = d; dataJson = json;
+  useLayout(d.layout);
   if (!anchor) anchor = parse(d.today);
   renderAll();
   showUpdating(stale);
@@ -422,8 +431,9 @@ function displayCategories() {
 }
 
 function budgetView() {
-  let h = '<main style="padding-top:4px"><div class="group">' + displayCategories().map(c => c.limit !== null ? limitRow(c) : plainRow(c)).join('') + '</div>';
-  const fixed = data.categories.filter(c => FIXED.has(c.name)).reduce((a, c) => a + c.spent, 0);
+  let h = '<main style="padding-top:4px"><div class="group">' + displayCategories().map(c => c.limit !== null ? limitRow(c) : plainRow(c)).join('') +
+          '<button class="addlimit" data-act="addcat">+ Add a category</button></div>';
+  const fixed = data.categories.filter(c => FIXED.has(c.name) && !MAIN_NAMES.has(c.name)).reduce((a, c) => a + c.spent, 0);
   h += '<p class="empty" style="padding-top:4px;font-size:14px">' +
        (fixed ? 'Fixed bills (rent, hydro, insurance, phone, family support…) are not shown: ' + fmt0(fixed) + ' in this period. ' : '') +
        'Tap a category to set its monthly limit or see its purchases.' +
@@ -452,7 +462,7 @@ function plainRow(c) {
 
 function txView() {
   const list = data.transactions.filter(t => !catFilter ||
-    (catFilter === OTHER_FILTER ? isOther(t.category) : catFilter === FIXED_FILTER ? FIXED.has(t.category) : t.category === catFilter));
+    (catFilter === OTHER_FILTER ? isOther(t.category) : catFilter === FIXED_FILTER ? isFixed(t.category) : t.category === catFilter));
   const filters = [['', 'All categories']].concat(MAIN.map(m => [m[1], m[0]]), [[OTHER_FILTER, 'Other'], [FIXED_FILTER, 'Fixed bills'], ['Needs review', 'Needs a category']]);
   let h = '<main><div class="tools"><select id="catfilter" aria-label="Category">' +
           filters.map(f => '<option value="' + esc(f[0]) + '"' + (f[0] === catFilter ? ' selected' : '') + '>' + esc(f[1]) + '</option>').join('') +
@@ -489,11 +499,18 @@ function categorySheet(key) {
         esc(p.name === 'Needs review' ? 'Needs a category' : p.name) + '</span><span>' + fmt0(p.spent) + '</span></div>').join('') + '</div>'
     : '';
   openSheet('<h3>' + esc(c.label) + '</h3><p class="note">' + fmt(c.spent) + ' spent in this period' +
-    (c.limit !== null ? ', limit ' + fmt(c.limit) : '') + (c.parts ? '. Everything outside the seven categories above, except fixed bills:' : '') + '</p>' + breakdown +
+    (c.limit !== null ? ', limit ' + fmt(c.limit) : '') + (c.parts ? '. Everything outside the categories above, except fixed bills:' : '') + '</p>' + breakdown +
     '<label class="field" for="lim">Monthly limit</label>' +
     '<input class="input" id="lim" type="number" inputmode="decimal" min="0" step="10" placeholder="No limit" value="' + (c.monthlyLimit ?? '') + '">' +
     '<div class="actions"><button class="btn" id="limsave">Save limit</button><button class="btn quiet" id="seetx">See purchases</button></div>' +
-    (c.monthlyLimit !== null ? '<button class="textbtn danger" id="limremove">Remove limit</button>' : ''));
+    (c.monthlyLimit !== null ? '<button class="textbtn danger" id="limremove">Remove limit</button>' : '') +
+    (key !== OTHER ? '<button class="textbtn" id="catremove">Take ' + esc(c.label) + ' off this list</button>' : ''));
+  if ($('catremove')) $('catremove').onclick = e => {
+    if (!confirmOnce(e.currentTarget, 'Tap again to confirm. Its purchases will count in Other.')) return;
+    e.currentTarget.disabled = true;
+    server().withSuccessHandler(() => { closeSheet(); toast(c.label + ' taken off the list'); reload(); })
+      .withFailureHandler(err => { e.currentTarget.disabled = false; toast(friendly(err)); }).removeCategory(key);
+  };
   $('seetx').onclick = () => {
     closeSheet(); catFilter = key === OTHER ? OTHER_FILTER : key; tab = 'tx';
     renderTx(); showTab(); saveView(); window.scrollTo(0, 0);
@@ -505,6 +522,43 @@ function categorySheet(key) {
   };
   $('limsave').onclick = e => { const v = $('lim').value.trim(); if (v === '') return toast('Enter an amount, or remove the limit'); save(v, e.currentTarget, 'Limit saved'); };
   if ($('limremove')) $('limremove').onclick = e => save('', e.currentTarget, 'Limit removed');
+}
+
+/* A button that asks for a second tap instead of a pop-up dialog */
+function confirmOnce(btn, text) {
+  if (btn.dataset.armed) return true;
+  btn.dataset.armed = '1'; btn.textContent = text; btn.classList.add('danger');
+  return false;
+}
+function friendly(err) {
+  return /Unknown action/.test(err.message) ? 'Update Api.gs in Apps Script first (see the setup notes)' : err.message;
+}
+
+function addCategorySheet() {
+  const unused = data.categoryOptions.filter(c => !MAIN_NAMES.has(c) && !NOT_SPENDING.test(c) && c !== 'Needs review' && c !== OTHER);
+  openSheet('<h3>Add a category</h3><p class="note">It appears on the Budget tab just above Other. ' +
+    'Pick one your purchases already use, or create a new one and move purchases into it.</p>' +
+    '<label class="field" for="acpick">Category</label><select class="input" id="acpick">' +
+    unused.map(c => '<option value="' + esc(c) + '">' + esc(c) + (FIXED.has(c) ? ' (fixed bill)' : '') + '</option>').join('') +
+    '<option value="__new"' + (unused.length ? '' : ' selected') + '>New category…</option></select>' +
+    '<input class="input" id="acnew" placeholder="Name, for example Kids or Gifts" maxlength="40" style="display:' + (unused.length ? 'none' : 'block') + ';margin-top:-6px">' +
+    '<label class="field" for="aclim">Monthly limit (optional)</label>' +
+    '<input class="input" id="aclim" type="number" inputmode="decimal" min="0" step="10" placeholder="No limit">' +
+    '<div class="actions"><button class="btn" id="acsave">Add category</button><button class="btn quiet" id="accancel">Cancel</button></div>');
+  $('acpick').onchange = () => { const n = $('acpick').value === '__new'; $('acnew').style.display = n ? 'block' : 'none'; if (n) $('acnew').focus(); };
+  $('accancel').onclick = closeSheet;
+  $('acsave').onclick = e => {
+    const name = $('acpick').value === '__new' ? $('acnew').value.trim() : $('acpick').value;
+    const limit = $('aclim').value.trim();
+    if (!name) return toast('Enter a name');
+    const btn = e.currentTarget; btn.disabled = true;
+    const fail = err => { btn.disabled = false; toast(friendly(err)); };
+    server().withSuccessHandler(() => {
+      const done = () => { closeSheet(); toast(name + ' added'); reload(); };
+      if (limit === '') return done();
+      server().withSuccessHandler(done).withFailureHandler(fail).setLimit(name, limit);
+    }).withFailureHandler(fail).addCategory(name, name);
+  };
 }
 
 function recategorizeSheet(rows) {
@@ -521,7 +575,7 @@ function recategorizeSheet(rows) {
     (known ? '' : '<option value="" disabled selected>Choose a category</option>') +
     MAIN.map(m => '<option value="' + esc(m[1]) + '"' + (m[1] === current ? ' selected' : '') + '>' + esc(m[0]) + '</option>').join('') +
     '<optgroup label="Fixed bills">' +
-    data.categoryOptions.filter(c => FIXED.has(c)).map(c => '<option value="' + esc(c) + '"' + (c === current ? ' selected' : '') + '>' + esc(c) + '</option>').join('') +
+    data.categoryOptions.filter(c => isFixed(c)).map(c => '<option value="' + esc(c) + '"' + (c === current ? ' selected' : '') + '>' + esc(c) + '</option>').join('') +
     '</optgroup><optgroup label="Other">' +
     data.categoryOptions.filter(c => !MAIN_NAMES.has(c) && !FIXED.has(c)).map(c => '<option value="' + esc(c) + '"' + (c === current ? ' selected' : '') + '>' + esc(c) + '</option>').join('') +
     '<option value="__new">New category…</option></optgroup></select>' +
@@ -560,6 +614,7 @@ $('view').addEventListener('click', e => {
   if (!el || !data) return;
   const a = el.dataset.act;
   if (a === 'cat') categorySheet(el.dataset.cat);
+  if (a === 'addcat') addCategorySheet();
   if (a === 'select') { selecting = !selecting; selected.clear(); renderTx(); }
   if (a === 'tx') {
     const row = Number(el.dataset.row);
