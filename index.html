@@ -193,7 +193,7 @@ function getCfg() { try { return JSON.parse(localStorage.getItem(CFG_KEY)) || nu
 function setCfg(c) { try { c ? localStorage.setItem(CFG_KEY, JSON.stringify(c)) : localStorage.removeItem(CFG_KEY); } catch (e) {} }
 const VIEW_KEY = 'budget.view';   // the period you were looking at, kept between visits
 function saveView() {
-  try { localStorage.setItem(VIEW_KEY, JSON.stringify({ period, start: $('cstart').value, end: $('cend').value })); } catch (e) {}
+  try { localStorage.setItem(VIEW_KEY, JSON.stringify({ period, start: $('cstart').value, end: $('cend').value, tab, catFilter })); } catch (e) {}
 }
 function savedView() { try { return JSON.parse(localStorage.getItem(VIEW_KEY)) || null; } catch (e) { return null; } }
 function cacheGet(k) { try { return JSON.parse(localStorage.getItem(CACHE_KEY + k)); } catch (e) { return null; } }
@@ -425,7 +425,7 @@ function plainRow(c) {
 
 function txView() {
   const list = data.transactions.filter(t => !catFilter || t.category === catFilter);
-  const cats = Array.from(new Set(data.transactions.map(t => t.category))).sort();
+  const cats = Array.from(new Set(data.transactions.map(t => t.category).concat(catFilter ? [catFilter] : []))).sort();
   let h = '<main><div class="tools"><select id="catfilter" aria-label="Category"><option value="">All categories</option>' +
           cats.map(c => '<option' + (c === catFilter ? ' selected' : '') + '>' + esc(c) + '</option>').join('') +
           '</select><button data-act="select" class="' + (selecting ? 'on' : '') + '">' + (selecting ? 'Done' : 'Select') + '</button></div>';
@@ -463,7 +463,7 @@ function categorySheet(name) {
       '<div class="actions"><button class="btn" id="limsave">Save limit</button><button class="btn quiet" id="seetx">See transactions</button></div>' +
       (c.monthlyLimit !== null ? '<button class="textbtn danger" id="limremove">Remove limit</button>' : '')
     : '<div class="actions"><button class="btn" id="seetx">See transactions</button></div>'));
-  $('seetx').onclick = () => { closeSheet(); catFilter = name; tab = 'tx'; renderTx(); showTab(); window.scrollTo(0, 0); };
+  $('seetx').onclick = () => { closeSheet(); catFilter = name; tab = 'tx'; renderTx(); showTab(); saveView(); window.scrollTo(0, 0); };
   if (!canLimit) return;
   const save = (value, btn, done) => {
     btn.disabled = true;
@@ -551,7 +551,7 @@ $('view').addEventListener('click', e => {
   }
 });
 $('view').addEventListener('change', e => {
-  if (e.target.id === 'catfilter') { catFilter = e.target.value; selected.clear(); renderTx(); }
+  if (e.target.id === 'catfilter') { catFilter = e.target.value; selected.clear(); renderTx(); saveView(); }
 });
 $('sheet').onclick = e => { if (e.target.id === 'sheet') closeSheet(); };
 document.addEventListener('keydown', e => { if (e.key === 'Escape') closeSheet(); });
@@ -566,15 +566,29 @@ function applyCustom() {
   saveView();
   if (!data || data.start !== s || data.end !== e || lastRange[0] !== s || lastRange[1] !== e) load(s, e);
 }
-$('cstart').addEventListener('change', applyCustom);
-$('cend').addEventListener('change', applyCustom);
+// iPhone date pickers do not always send "change" before you leave, so listen to every signal
+['input', 'change', 'blur'].forEach(ev => {
+  $('cstart').addEventListener(ev, applyCustom);
+  $('cend').addEventListener(ev, applyCustom);
+});
+// Save where you are whenever the app goes to the background or closes
+function saveOnLeave() {
+  if (!getCfg()) return;
+  if (period === 'custom') {
+    const s = $('cstart').value, e = $('cend').value;
+    if (!s || !e || s > e) return;
+  }
+  saveView();
+}
+window.addEventListener('pagehide', saveOnLeave);
+document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'hidden') saveOnLeave(); });
 $('tab-budget').onclick = () => {
   if (tab === 'budget') return;
   tab = 'budget';
   if (selecting) { selecting = false; selected.clear(); renderTx(); }
-  showTab(); window.scrollTo(0, 0);
+  showTab(); saveView(); window.scrollTo(0, 0);
 };
-$('tab-tx').onclick = () => { if (tab === 'tx') return; tab = 'tx'; showTab(); window.scrollTo(0, 0); };
+$('tab-tx').onclick = () => { if (tab === 'tx') return; tab = 'tx'; showTab(); saveView(); window.scrollTo(0, 0); };
 $('bulkchange').onclick = () => { if (!selected.size) return toast('Tick at least one transaction'); recategorizeSheet(Array.from(selected)); };
 $('bulkcancel').onclick = () => { selecting = false; selected.clear(); renderTx(); };
 /* ---------- first-time setup and settings ---------- */
@@ -635,6 +649,8 @@ $('logo').onkeydown = e => { if (e.key === 'Enter') settingsSheet(); };
   }
   if (!getCfg()) return setupView();
   const v = savedView();
+  if (v && (v.tab === 'tx' || v.tab === 'budget')) tab = v.tab;
+  if (v && typeof v.catFilter === 'string') catFilter = v.catFilter;
   if (v && v.period === 'custom' && v.start && v.end) {
     period = 'custom'; $('cstart').value = v.start; $('cend').value = v.end;
     return load(v.start, v.end);
