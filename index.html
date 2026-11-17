@@ -482,13 +482,15 @@ function setupView(problem) {
   $('prev').style.visibility = $('next').style.visibility = 'hidden';
   $('view').innerHTML = '<div class="setup"><h2>Connect your sheet</h2><p>' +
     (problem && problem !== 'Not connected' ? esc(problem) + '. ' : '') +
-    'Paste the web app URL and the key from Apps Script. You only do this once on each phone.</p>' +
-    '<label class="field" for="su">Web app URL</label><input class="input" id="su" placeholder="https://script.google.com/macros/s/…/exec" autocapitalize="off" autocorrect="off">' +
+    'Paste the web app URL and the key from Apps Script, or paste a setup link in the first box. You only do this once on each phone.</p>' +
+    '<label class="field" for="su">Web app URL or setup link</label><input class="input" id="su" placeholder="https://script.google.com/macros/s/…/exec" autocapitalize="off" autocorrect="off">' +
     '<label class="field" for="sk">Key</label><input class="input" id="sk" autocapitalize="off" autocorrect="off">' +
     '<button class="btn" style="width:100%" id="sgo">Connect</button></div>';
   const cfg = getCfg(); if (cfg) { $('su').value = cfg.u; $('sk').value = cfg.k; }
   $('sgo').onclick = e => {
-    const u = $('su').value.trim(), k = $('sk').value.trim();
+    let u = $('su').value.trim(), k = $('sk').value.trim();
+    const link = u.match(/#connect=(.+)$/);        // a setup link pasted in the URL box also works
+    if (link) { try { const c = JSON.parse(atob(link[1].replace(/-/g, '+').replace(/_/g, '/'))); u = c.u; k = c.k; } catch (err) {} }
     if (!/^https:\/\/script\.google\.com\/.+\/exec$/.test(u)) return toast('The URL should end in /exec');
     if (!k) return toast('Paste the key');
     e.currentTarget.disabled = true;
