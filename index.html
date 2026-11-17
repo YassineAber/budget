@@ -506,7 +506,7 @@ function setupLink() {
 }
 function settingsSheet() {
   if (!getCfg()) return;
-  openSheet('<h3>Settings</h3><p class="note">To set up Aleksandra\'s phone, send her this link. It contains your key, so only share it with her.</p>' +
+  openSheet('<h3>Settings</h3><p class="note">To set up Aleksandra\'s phone, send her this link. She adds Budget to her home screen, opens it, and pastes the link in the first box. It contains your key, so only share it with her.</p>' +
     '<div class="actions"><button class="btn" id="copylink">Copy setup link</button><button class="btn quiet" id="refresh">Refresh now</button></div>' +
     '<button class="textbtn danger" id="disconnect">Disconnect this phone</button>');
   $('copylink').onclick = () => {
