@@ -187,6 +187,11 @@ const NO_LIMIT = /^Excluded|^Work:|^Needs review$/;
 const CFG_KEY = 'budget.connection', CACHE_KEY = 'budget.cache.';
 function getCfg() { try { return JSON.parse(localStorage.getItem(CFG_KEY)) || null; } catch (e) { return null; } }
 function setCfg(c) { try { c ? localStorage.setItem(CFG_KEY, JSON.stringify(c)) : localStorage.removeItem(CFG_KEY); } catch (e) {} }
+const VIEW_KEY = 'budget.view';   // the period you were looking at, kept between visits
+function saveView() {
+  try { localStorage.setItem(VIEW_KEY, JSON.stringify({ period, start: $('cstart').value, end: $('cend').value })); } catch (e) {}
+}
+function savedView() { try { return JSON.parse(localStorage.getItem(VIEW_KEY)) || null; } catch (e) { return null; } }
 function cacheGet(k) { try { return JSON.parse(localStorage.getItem(CACHE_KEY + k)); } catch (e) { return null; } }
 function cacheSet(k, v) { try { localStorage.setItem(CACHE_KEY + k, JSON.stringify(v)); } catch (e) {} }
 
@@ -444,7 +449,7 @@ function recategorizeSheet(rows) {
 function choosePeriod(p) {
   period = p;
   if (p === 'custom') { if (!$('cstart').value) { $('cstart').value = data.start; $('cend').value = data.end; } render(); return; }
-  anchor = parse(data.today); loadPeriod();
+  anchor = parse(data.today); saveView(); loadPeriod();
 }
 function bindView() {
   document.querySelectorAll('#view [data-act]').forEach(el => el.onclick = () => {
@@ -469,6 +474,7 @@ $('capply').onclick = () => {
   const s = $('cstart').value, e = $('cend').value;
   if (!s || !e) return toast('Pick both dates');
   if (s > e) return toast('The start date is after the end date');
+  saveView();
   load(s, e);
 };
 $('tab-budget').onclick = () => { tab = 'budget'; selecting = false; selected.clear(); render(); };
@@ -531,6 +537,14 @@ $('logo').onkeydown = e => { if (e.key === 'Enter') settingsSheet(); };
     history.replaceState(null, '', location.pathname);
   }
   if (!getCfg()) return setupView();
+  const v = savedView();
+  if (v && v.period === 'custom' && v.start && v.end) {
+    period = 'custom'; $('cstart').value = v.start; $('cend').value = v.end;
+    return load(v.start, v.end);
+  }
+  if (v && ['week', 'quarter', 'year'].indexOf(v.period) >= 0) {
+    period = v.period; anchor = new Date(); return loadPeriod();
+  }
   load('', '');
 })();
 document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'visible' && getCfg() && data) reload(); });
