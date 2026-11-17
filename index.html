@@ -41,7 +41,11 @@
   .setup { padding: 24px 20px; }
   .setup h2 { font-size: 24px; margin: 0 0 6px; }
   .setup p { color: var(--muted); margin: 0 0 18px; }
-  .stale { font-size: 12px; color: var(--faint); text-align: center; padding: 4px 0 0; }
+  .updating { height: 0; overflow: hidden; text-align: center; font-size: 12px; color: var(--faint); transition: height .15s; }
+  .updating.show { height: 18px; }
+  button { touch-action: manipulation; }
+  .daygroup { content-visibility: auto; contain-intrinsic-size: auto 260px; }
+  [hidden] { display: none !important; }
   .nav h1 { flex: 1; margin: 0; font-size: 17px; font-weight: 600; }
   .nav button { border: 0; background: none; width: 36px; height: 36px; border-radius: 50%; font-size: 22px; line-height: 1; color: var(--muted); }
   .nav button:disabled { opacity: .3; }
@@ -164,6 +168,7 @@
     <button class="btn" id="capply" style="flex:none;padding:10px 16px">Show</button>
   </div>
 </header>
+<div class="updating" id="updating" aria-live="polite">Updating</div>
 <div id="view"></div>
 <nav class="tabs">
   <button id="tab-budget" class="on">Budget</button>
@@ -193,24 +198,41 @@ function saveView() {
 }
 function savedView() { try { return JSON.parse(localStorage.getItem(VIEW_KEY)) || null; } catch (e) { return null; } }
 function cacheGet(k) { try { return JSON.parse(localStorage.getItem(CACHE_KEY + k)); } catch (e) { return null; } }
-function cacheSet(k, v) { try { localStorage.setItem(CACHE_KEY + k, JSON.stringify(v)); } catch (e) {} }
+function cacheSet(k, v, json) {
+  try {
+    localStorage.setItem(CACHE_KEY + k, json || JSON.stringify(v));
+    // keep only the 10 most recently used periods so storage never fills up
+    const order = (JSON.parse(localStorage.getItem(CACHE_KEY + '_order')) || []).filter(x => x !== k);
+    order.unshift(k);
+    order.slice(10).forEach(x => localStorage.removeItem(CACHE_KEY + x));
+    localStorage.setItem(CACHE_KEY + '_order', JSON.stringify(order.slice(0, 10)));
+  } catch (e) {}
+}
 
 async function call(method, payload) {
   const cfg = getCfg();
   if (!cfg) throw new Error('Not connected');
   let res;
-  if (method === 'GET') {
-    const qs = new URLSearchParams(Object.assign({ key: cfg.k }, payload)).toString();
-    res = await fetch(cfg.u + '?' + qs, { redirect: 'follow' });
-  } else {
-    res = await fetch(cfg.u, { method: 'POST', redirect: 'follow', headers: { 'Content-Type': 'text/plain;charset=utf-8' },
-                               body: JSON.stringify(Object.assign({ key: cfg.k }, payload)) });
+  const ctl = new AbortController(), timer = setTimeout(() => ctl.abort(), 25000);
+  try {
+    if (method === 'GET') {
+      const qs = new URLSearchParams(Object.assign({ key: cfg.k }, payload)).toString();
+      res = await fetch(cfg.u + '?' + qs, { redirect: 'follow', signal: ctl.signal });
+    } else {
+      res = await fetch(cfg.u, { method: 'POST', redirect: 'follow', signal: ctl.signal,
+                                 headers: { 'Content-Type': 'text/plain;charset=utf-8' },
+                                 body: JSON.stringify(Object.assign({ key: cfg.k }, payload)) });
+    }
+  } catch (e) {
+    throw new Error(e.name === 'AbortError' ? 'The sheet took too long to answer' : 'No connection');
+  } finally {
+    clearTimeout(timer);
   }
   const out = await res.json().catch(() => { throw new Error('No answer from the sheet. Check the web app URL.'); });
   if (!out.ok) throw new Error(out.error || 'Something went wrong');
   return out.data;
 }
-/* Same shape as server(), so the rest of the page reads the same */
+/* A small chain-style wrapper: server().withSuccessHandler(f).withFailureHandler(g).getDashboard(...) */
 function server() {
   let ok = () => {}, fail = () => {};
   const api = {
@@ -245,12 +267,18 @@ function shift(p, a, dir) {
   if (p === 'year') d.setFullYear(d.getFullYear() + dir, 0, 1);
   return d;
 }
-const short = d => d.toLocaleDateString('en-CA', { month: 'short', day: 'numeric' });
+const F_SHORT = new Intl.DateTimeFormat('en-CA', { month: 'short', day: 'numeric' });
+const F_MONTH = new Intl.DateTimeFormat('en-CA', { month: 'long', year: 'numeric' });
+const F_MON = new Intl.DateTimeFormat('en-CA', { month: 'short' });
+const F_MON_Y = new Intl.DateTimeFormat('en-CA', { month: 'short', year: 'numeric' });
+const F_DAY = new Intl.DateTimeFormat('en-CA', { weekday: 'long', month: 'long', day: 'numeric' });
+const F_MD = new Intl.DateTimeFormat('en-CA', { month: 'long', day: 'numeric' });
+const short = d => F_SHORT.format(d);
 function label(start, end) {
   const s = parse(start), e = parse(end);
-  if (period === 'month') return s.toLocaleDateString('en-CA', { month: 'long', year: 'numeric' });
+  if (period === 'month') return F_MONTH.format(s);
   if (period === 'year') return String(s.getFullYear());
-  if (period === 'quarter') return s.toLocaleDateString('en-CA', { month: 'short' }) + ' to ' + e.toLocaleDateString('en-CA', { month: 'short', year: 'numeric' });
+  if (period === 'quarter') return F_MON.format(s) + ' to ' + F_MON_Y.format(e);
   return short(s) + ' to ' + short(e) + ', ' + e.getFullYear();
 }
 
@@ -268,43 +296,92 @@ function tidy(m) {
   if (!s) s = m;
   return s.toLowerCase().replace(/(^|[\s\-\/&(.'])([a-zà-ÿ])/g, (x, p, c) => p + c.toUpperCase());
 }
-const txName = t => t.merchant ? tidy(t.merchant) : 'Withdrawal';
+const tidyMemo = new Map();
+const txName = t => {
+  if (!t.merchant) return 'Withdrawal';
+  let n = tidyMemo.get(t.merchant);
+  if (n === undefined) { n = tidy(t.merchant); tidyMemo.set(t.merchant, n); }
+  return n;
+};
 
 /* ---------- loading ---------- */
+let requestId = 0, lastFetch = 0, dataJson = '';
 function load(start, end) {
   lastRange = [start, end];
+  const id = ++requestId;                    // only the newest request may update the screen
   const key = (start || 'current') + '|' + (end || '');
-  const cached = cacheGet(key);
-  if (cached) { data = cached; if (!anchor) anchor = parse(cached.today); render(true); }   // show the last copy instantly
-  else $('title').textContent = 'Loading';
-  server().withSuccessHandler(d => { cacheSet(key, d); data = d; if (!anchor) anchor = parse(d.today); render(); })
-    .withFailureHandler(err => {
-      if (/Wrong key|No key|Not connected/.test(err.message)) return setupView(err.message);
-      if (cached) return toast('Offline: showing the last saved numbers');
-      $('title').textContent = 'Budget'; $('view').innerHTML = '<p class="empty">' + esc(err.message || err) + '</p>';
-    })
-    .getDashboard(start || '', end || '');
+  const cachedJson = (() => { try { return localStorage.getItem(CACHE_KEY + key); } catch (e) { return null; } })();
+  if (cachedJson) { setData(JSON.parse(cachedJson), cachedJson, true); }   // show the last copy instantly
+  else { $('title').textContent = 'Loading'; showUpdating(true); }
+  server().withSuccessHandler(d => {
+    if (id !== requestId) return;
+    lastFetch = Date.now();
+    const json = JSON.stringify(d);
+    cacheSet(key, d, json);
+    if (json === dataJson) return showUpdating(false);   // nothing changed: no redraw
+    setData(d, json, false);
+  }).withFailureHandler(err => {
+    if (id !== requestId) return;
+    showUpdating(false);
+    if (/Wrong key|No key|Not connected/.test(err.message)) return setupView(err.message);
+    if (data) return toast((err.message || 'No connection') + '. Showing the last saved numbers.');
+    $('title').textContent = 'Budget';
+    $('view').innerHTML = '<p class="empty">' + esc(err.message || err) + '</p>';
+    built = false;
+  }).getDashboard(start || '', end || '');
+}
+function setData(d, json, stale) {
+  data = d; dataJson = json;
+  if (!anchor) anchor = parse(d.today);
+  renderAll();
+  showUpdating(stale);
 }
 function loadPeriod() { const [s, e] = range(period, anchor); load(iso(s), iso(e)); }
 const reload = () => load(lastRange[0], lastRange[1]);
-function toast(text) { const t = $('toast'); t.textContent = text; t.classList.add('show'); setTimeout(() => t.classList.remove('show'), 1800); }
+let toastTimer = 0;
+function toast(text) {
+  const t = $('toast'); t.textContent = text; t.classList.add('show');
+  clearTimeout(toastTimer); toastTimer = setTimeout(() => t.classList.remove('show'), 2200);
+}
+function showUpdating(on) { $('updating').classList.toggle('show', !!on); }
 
-/* ---------- render ---------- */
-function render(stale) {
+/* ---------- render ----------
+   Both tabs are built once per data load and kept in the page;
+   switching tabs only shows one and hides the other. */
+let built = false;
+function ensureShell() {
+  if (built) return;
+  $('view').innerHTML = '<div id="vbudget"></div><div id="vtx" hidden></div>';
+  built = true;
+}
+function renderHeader() {
   $('periods').style.display = ''; $('prev').style.visibility = $('next').style.visibility = '';
   $('title').textContent = label(data.start, data.end);
   $('prev').disabled = period === 'custom';
   $('next').disabled = period === 'custom' || data.end >= data.today;
   $('periods').innerHTML = PERIODS.map(p => '<button role="tab" data-p="' + p[0] + '" class="' + (p[0] === period ? 'on' : '') + '">' + p[1] + '</button>').join('');
-  document.querySelectorAll('#periods button').forEach(b => b.onclick = () => choosePeriod(b.dataset.p));
   $('custom').classList.toggle('show', period === 'custom');
+  $('tab-tx').innerHTML = 'Transactions' + (data.needsReview ? '<span class="badge">' + data.needsReview + '</span>' : '');
+}
+function renderAll() {
+  ensureShell();
+  renderHeader();
+  $('vbudget').innerHTML = budgetView();
+  $('vtx').innerHTML = txView();
+  showTab();
+}
+function renderTx() { if (data) { $('vtx').innerHTML = txView(); updateBulk(); } }
+function showTab() {
+  if (!built) return;
+  $('vbudget').hidden = tab !== 'budget';
+  $('vtx').hidden = tab !== 'tx';
   $('tab-budget').className = tab === 'budget' ? 'on' : '';
   $('tab-tx').className = tab === 'tx' ? 'on' : '';
-  $('tab-tx').innerHTML = 'Transactions' + (data.needsReview ? '<span class="badge">' + data.needsReview + '</span>' : '');
-  $('view').innerHTML = (stale ? '<div class="stale">Updating…</div>' : '') + (tab === 'budget' ? budgetView() : txView());
+  updateBulk();
+}
+function updateBulk() {
   $('bulk').classList.toggle('show', tab === 'tx' && selecting);
   $('bulkchange').textContent = selected.size ? 'Change category of ' + selected.size : 'Tick transactions to change';
-  bindView();
 }
 
 function budgetView() {
@@ -360,11 +437,11 @@ function txView() {
     const d = t.date.slice(0, 10);
     if (d !== day) {
       if (open) h += '</div>';
-      h += '<div class="day">' + parse(d).toLocaleDateString('en-CA', { weekday: 'long', month: 'long', day: 'numeric' }) + '</div><div class="group">';
+      h += '<div class="day">' + F_DAY.format(parse(d)) + '</div><div class="group daygroup">';
       day = d; open = true;
     }
     const review = t.category === 'Needs review';
-    h += '<button class="tx" data-act="tx" data-row="' + t.row + '">' +
+    h += '<button class="tx" data-act="tx" data-row="' + t.row + '"' + (selecting && selected.has(t.row) ? ' aria-pressed="true"' : '') + '>' +
          (selecting ? '<span class="box' + (selected.has(t.row) ? ' on' : '') + '"></span>' : '') +
          '<span class="body"><div class="m">' + esc(txName(t)) + '</div>' +
          '<div class="meta' + (review ? ' review' : '') + '">' + (review ? 'Needs a category' : esc(t.category)) + ', ' + esc(t.person) + '</div></span>' +
@@ -387,7 +464,7 @@ function categorySheet(name) {
       '<div class="actions"><button class="btn" id="limsave">Save limit</button><button class="btn quiet" id="seetx">See transactions</button></div>' +
       (c.monthlyLimit !== null ? '<button class="textbtn danger" id="limremove">Remove limit</button>' : '')
     : '<div class="actions"><button class="btn" id="seetx">See transactions</button></div>'));
-  $('seetx').onclick = () => { closeSheet(); catFilter = name; tab = 'tx'; render(); window.scrollTo(0, 0); };
+  $('seetx').onclick = () => { closeSheet(); catFilter = name; tab = 'tx'; renderTx(); showTab(); window.scrollTo(0, 0); };
   if (!canLimit) return;
   const save = (value, btn, done) => {
     btn.disabled = true;
@@ -420,7 +497,7 @@ function recategorizeSheet(rows) {
   const current = single ? first.category : '';
   const known = data.categoryOptions.indexOf(current) >= 0;
   const merchants = Array.from(new Set(items.map(t => t.merchant).filter(Boolean)));
-  const when = single ? parse(first.date.slice(0, 10)).toLocaleDateString('en-CA', { month: 'long', day: 'numeric' }) : '';
+  const when = single ? F_MD.format(parse(first.date.slice(0, 10))) : '';
   openSheet('<h3>' + (single ? esc(txName(first)) : items.length + ' transactions') + '</h3>' +
     '<p class="note">' + fmt(items.reduce((a, t) => a + t.amount, 0)) + (single ? ', ' + when + ', ' + esc(first.person) : '') +
     (single && first.merchant ? '<br>' + esc(first.merchant) : '') + '</p>' +
@@ -439,37 +516,47 @@ function recategorizeSheet(rows) {
     if (!cat) return toast('Choose a category');
     const always = !!($('always') || {}).checked;
     e.currentTarget.disabled = true;
-    server().withSuccessHandler(() => { closeSheet(); selecting = false; selected.clear(); toast('Saved'); reload(); })
+    server().withSuccessHandler(() => { closeSheet(); selecting = false; selected.clear(); updateBulk(); toast('Saved'); reload(); })
       .withFailureHandler(err => { e.currentTarget.disabled = false; toast(err.message); })
       .setCategories(items.map(t => ({ row: t.row, id: t.id })), cat, always);
   };
 }
 
-/* ---------- events ---------- */
+/* ---------- events (one listener each, so nothing is re-attached on redraw) ---------- */
 function choosePeriod(p) {
+  if (!data) return;
   period = p;
-  if (p === 'custom') { if (!$('cstart').value) { $('cstart').value = data.start; $('cend').value = data.end; } render(); return; }
+  if (p === 'custom') {
+    if (!$('cstart').value) { $('cstart').value = data.start; $('cend').value = data.end; }
+    renderHeader();
+    return;
+  }
   anchor = parse(data.today); saveView(); loadPeriod();
 }
-function bindView() {
-  document.querySelectorAll('#view [data-act]').forEach(el => el.onclick = () => {
-    const a = el.dataset.act;
-    if (a === 'cat') categorySheet(el.dataset.cat);
-    if (a === 'newlimit') newLimitSheet();
-    if (a === 'select') { selecting = !selecting; selected.clear(); render(); }
-    if (a === 'tx') {
-      const row = Number(el.dataset.row);
-      if (selecting) { selected.has(row) ? selected.delete(row) : selected.add(row); render(); }
-      else recategorizeSheet([row]);
-    }
-  });
-  const f = $('catfilter');
-  if (f) f.onchange = () => { catFilter = f.value; selected.clear(); render(); };
-}
+$('periods').addEventListener('click', e => { const b = e.target.closest('button[data-p]'); if (b) choosePeriod(b.dataset.p); });
+$('view').addEventListener('click', e => {
+  const el = e.target.closest('[data-act]');
+  if (!el || !data) return;
+  const a = el.dataset.act;
+  if (a === 'cat') categorySheet(el.dataset.cat);
+  if (a === 'newlimit') newLimitSheet();
+  if (a === 'select') { selecting = !selecting; selected.clear(); renderTx(); }
+  if (a === 'tx') {
+    const row = Number(el.dataset.row);
+    if (!selecting) return recategorizeSheet([row]);
+    const on = !selected.has(row);
+    on ? selected.add(row) : selected.delete(row);
+    const box = el.querySelector('.box'); if (box) box.classList.toggle('on', on);   // no full redraw
+    updateBulk();
+  }
+});
+$('view').addEventListener('change', e => {
+  if (e.target.id === 'catfilter') { catFilter = e.target.value; selected.clear(); renderTx(); }
+});
 $('sheet').onclick = e => { if (e.target.id === 'sheet') closeSheet(); };
 document.addEventListener('keydown', e => { if (e.key === 'Escape') closeSheet(); });
-$('prev').onclick = () => { anchor = shift(period, anchor, -1); loadPeriod(); };
-$('next').onclick = () => { anchor = shift(period, anchor, 1); loadPeriod(); };
+$('prev').onclick = () => { if (!anchor) return; anchor = shift(period, anchor, -1); loadPeriod(); };
+$('next').onclick = () => { if (!anchor) return; anchor = shift(period, anchor, 1); loadPeriod(); };
 $('capply').onclick = () => {
   const s = $('cstart').value, e = $('cend').value;
   if (!s || !e) return toast('Pick both dates');
@@ -477,15 +564,21 @@ $('capply').onclick = () => {
   saveView();
   load(s, e);
 };
-$('tab-budget').onclick = () => { tab = 'budget'; selecting = false; selected.clear(); render(); };
-$('tab-tx').onclick = () => { tab = 'tx'; render(); };
+$('tab-budget').onclick = () => {
+  if (tab === 'budget') return;
+  tab = 'budget';
+  if (selecting) { selecting = false; selected.clear(); renderTx(); }
+  showTab(); window.scrollTo(0, 0);
+};
+$('tab-tx').onclick = () => { if (tab === 'tx') return; tab = 'tx'; showTab(); window.scrollTo(0, 0); };
 $('bulkchange').onclick = () => { if (!selected.size) return toast('Tick at least one transaction'); recategorizeSheet(Array.from(selected)); };
-$('bulkcancel').onclick = () => { selecting = false; selected.clear(); render(); };
+$('bulkcancel').onclick = () => { selecting = false; selected.clear(); renderTx(); };
 /* ---------- first-time setup and settings ---------- */
 function setupView(problem) {
   $('title').textContent = 'Budget';
   $('periods').style.display = 'none'; $('custom').classList.remove('show');
   $('prev').style.visibility = $('next').style.visibility = 'hidden';
+  built = false; data = null; dataJson = ''; showUpdating(false); $('bulk').classList.remove('show');
   $('view').innerHTML = '<div class="setup"><h2>Connect your sheet</h2><p>' +
     (problem && problem !== 'Not connected' ? esc(problem) + '. ' : '') +
     'Paste the web app URL and the key from Apps Script, or paste a setup link in the first box. You only do this once on each phone.</p>' +
@@ -521,7 +614,7 @@ function settingsSheet() {
       .catch(() => {});
   };
   $('refresh').onclick = () => { closeSheet(); reload(); };
-  $('disconnect').onclick = () => { setCfg(null); try { Object.keys(localStorage).filter(k => k.startsWith(CACHE_KEY)).forEach(k => localStorage.removeItem(k)); } catch (e) {} closeSheet(); setupView(); };
+  $('disconnect').onclick = () => { setCfg(null); try { localStorage.removeItem(VIEW_KEY); } catch (e) {} try { Object.keys(localStorage).filter(k => k.startsWith(CACHE_KEY)).forEach(k => localStorage.removeItem(k)); } catch (e) {} closeSheet(); setupView(); };
 }
 $('logo').onclick = settingsSheet;
 $('logo').onkeydown = e => { if (e.key === 'Enter') settingsSheet(); };
@@ -547,7 +640,10 @@ $('logo').onkeydown = e => { if (e.key === 'Enter') settingsSheet(); };
   }
   load('', '');
 })();
-document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'visible' && getCfg() && data) reload(); });
+// Coming back to the app refreshes the numbers, at most once a minute
+document.addEventListener('visibilitychange', () => {
+  if (document.visibilityState === 'visible' && getCfg() && data && Date.now() - lastFetch > 60000) reload();
+});
 if ('serviceWorker' in navigator) navigator.serviceWorker.register('sw.js').catch(() => {});
 </script>
 </body>

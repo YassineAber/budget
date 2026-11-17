@@ -278,13 +278,12 @@ function applyRules_(tx, rulesSheet) {
   const rules = loadRules_(rulesSheet);
   const range = tx.getRange(2, 1, n, TX_HEADERS.length);
   const rows = range.getValues();
-  let changed = false;
-  rows.forEach(r => {
+  // Write only the rows that changed, so an edit made in the sheet meanwhile is never overwritten
+  rows.forEach((r, i) => {
     if (r[7] !== 'Needs review') return;
     const cat = categorize_(String(r[4]), r[1], rules);
-    if (cat) { r[5] = cat; r[7] = 'Auto'; changed = true; }
+    if (cat) tx.getRange(i + 2, 6, 1, 3).setValues([[cat, r[6], 'Auto']]);
   });
-  if (changed) tx.getRange(2, 6, n, 3).setValues(rows.map(r => [r[5], r[6], r[7]]));
 }
 
 /** Run by hand after editing the Rules tab, to re-check everything still in "Needs review". */
