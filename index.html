@@ -54,7 +54,7 @@
   .seg button.on { background: var(--surface); color: var(--ink); font-weight: 600; box-shadow: 0 1px 2px rgba(0,0,0,.08); }
   .custom { display: none; gap: 8px; margin-top: 10px; align-items: center; }
   .custom.show { display: flex; }
-  .custom input { flex: 1; min-width: 0; padding: 8px; border: 0; border-radius: 10px; background: var(--surface); }
+  .custom input { flex: 1; min-width: 0; padding: 10px; border: 0; border-radius: 10px; background: var(--surface); font-size: 16px; }
 
   /* Hero: what's left */
   .hero { padding: 22px 20px 8px; }
@@ -165,7 +165,6 @@
   <div class="custom" id="custom">
     <input type="date" id="cstart" aria-label="Start date">
     <input type="date" id="cend" aria-label="End date">
-    <button class="btn" id="capply" style="flex:none;padding:10px 16px">Show</button>
   </div>
 </header>
 <div class="updating" id="updating" aria-live="polite">Updating</div>
@@ -529,6 +528,7 @@ function choosePeriod(p) {
   if (p === 'custom') {
     if (!$('cstart').value) { $('cstart').value = data.start; $('cend').value = data.end; }
     renderHeader();
+    applyCustom();
     return;
   }
   anchor = parse(data.today); saveView(); loadPeriod();
@@ -557,13 +557,17 @@ $('sheet').onclick = e => { if (e.target.id === 'sheet') closeSheet(); };
 document.addEventListener('keydown', e => { if (e.key === 'Escape') closeSheet(); });
 $('prev').onclick = () => { if (!anchor) return; anchor = shift(period, anchor, -1); loadPeriod(); };
 $('next').onclick = () => { if (!anchor) return; anchor = shift(period, anchor, 1); loadPeriod(); };
-$('capply').onclick = () => {
+// A custom range applies (and is remembered) as soon as a date is picked: no button to forget
+function applyCustom() {
   const s = $('cstart').value, e = $('cend').value;
-  if (!s || !e) return toast('Pick both dates');
+  if (!s || !e) return;
   if (s > e) return toast('The start date is after the end date');
+  period = 'custom';
   saveView();
-  load(s, e);
-};
+  if (!data || data.start !== s || data.end !== e || lastRange[0] !== s || lastRange[1] !== e) load(s, e);
+}
+$('cstart').addEventListener('change', applyCustom);
+$('cend').addEventListener('change', applyCustom);
 $('tab-budget').onclick = () => {
   if (tab === 'budget') return;
   tab = 'budget';
